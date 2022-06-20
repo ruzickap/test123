@@ -1,0 +1,34 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "branchPrefix": "renovate/",
+  "labels": ["renovate", "renovate/{{replace '.*/' '' depName}}", "renovate/{{updateType}}"],
+  "flux": {
+    "fileMatch": ["flux/.+\\.ya?ml$"]
+  },
+  "packageRules": [
+    {
+      "matchUpdateTypes": ["patch"],
+      "automergeType": "branch",
+      "automerge": true,
+    },
+
+    {
+      "description": "Ignore frequent renovate updates",
+      "matchPackageNames": ["renovatebot/github-action"],
+      "matchUpdateTypes": ["patch"],
+      "enabled": false
+    },
+
+    {
+      "matchPackageNames": ["renovatebot/github-action"],
+      "matchUpdateTypes": ["minor"],
+      "automergeType": "branch",
+      "automerge": true,
+      "schedule": ["before 6am on Monday", "before 6am on Tuesday"],
+      // "schedule": ["every weekend"],
+    },
+  ],
+  "prBodyTemplate": "{{{table}}}{{{notes}}}{{{changelogs}}}",
+  "rebaseWhen": "behind-base-branch",
+  "separateMinorPatch": true,
+}

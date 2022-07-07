@@ -30,5 +30,17 @@
   ],
   "prBodyTemplate": "{{{table}}}{{{notes}}}{{{changelogs}}}",
   "rebaseWhen": "behind-base-branch",
+  "regexManagers": [
+    {
+      "fileMatch": [
+        ".*\\.tfvars$",
+      ],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>.+?) depName=(?<depName>.+?)( versioning=(?<versioning>.+?))?( extractVersion=(?<extractVersion>.+?))?( registryUrl=(?<registryUrl>.+?))?\\s.*(=|:\\s+)\"?(?<currentValue>.+?)\"?\\s",
+      ],
+      "versioningTemplate": "{{#if versioning}}{{{versioning}}}{{else}}semver{{/if}}",
+      "extractVersionTemplate": "{{#if extractVersion}}{{{extractVersion}}}{{else}}^v?(?<version>.+)${{/if}}",
+    },
+  ],
   "separateMinorPatch": true,
 }

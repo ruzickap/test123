@@ -19,7 +19,7 @@ on:
           - debug
           - trace
   schedule:
-    - cron: "0/30 3 * * 1,3,5"
+    - cron: "3,13,23,33 3 * * 0"
 
 env:
   LOG_LEVEL: debug

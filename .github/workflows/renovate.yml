@@ -18,8 +18,8 @@ on:
           - info
           - debug
           - trace
-  schedule:
-    - cron: "3,13,23,33 3 * * 0"
+#  schedule:
+#    - cron: "3,13,23,33 3 * * 0"
 
 env:
   LOG_LEVEL: debug

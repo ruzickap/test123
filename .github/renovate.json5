@@ -1,14 +1,28 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "branchPrefix": "renovate/",
-  "labels": ["renovate", "renovate/{{replace '.*/' '' depName}}", "renovate/{{updateType}}"],
   "flux": {
     "fileMatch": ["flux/.+\\.ya?ml$"]
   },
+  // ignore individual fluxcd images
+  "ignoreDeps": [
+    "ghcr.io/fluxcd/helm-controller",
+    "ghcr.io/fluxcd/image-automation-controller",
+    "ghcr.io/fluxcd/image-reflector-controller",
+    "ghcr.io/fluxcd/kustomize-controller",
+    "ghcr.io/fluxcd/notification-controller",
+    "ghcr.io/fluxcd/source-controller"
+  ],
+  "kubernetes": {
+    "fileMatch": ["\\.ya?ml$"]
+  },
+  "labels": ["renovate", "renovate/{{replace '.*/' '' depName}}", "renovate/{{updateType}}"],
   "packageRules": [
     {
       "matchUpdateTypes": ["patch"],
       "automergeType": "branch",
+      // Do not wait for tests - this will speed up the whole process - updating many branches + running many tests
+      "ignoreTests": true,
       "automerge": true,
     },
 
@@ -25,7 +39,13 @@
       "automergeType": "branch",
       "automerge": true,
       "ignoreTests": true,
-      "schedule": ["on Friday"],
+      "schedule": ["on Sunday"],
+    },
+
+    {
+      "description": "Ignore terraform-aws-eks-blueprints updates",
+      "matchPackageNames": ["github.com/aws-ia/terraform-aws-eks-blueprints"],
+      "automerge": false,
     },
   ],
   "prBodyTemplate": "{{{table}}}{{{notes}}}{{{changelogs}}}",
@@ -33,13 +53,18 @@
   "regexManagers": [
     {
       "fileMatch": [
+        "^\\.github/workflows/.*\\.ya?ml$",
+        "^docs/src/part-.*\\.md$",
         ".*\\.tfvars$",
+        "README\\.md$",
+        "kustomization\\.yaml$",
       ],
       "matchStrings": [
-        "# renovate: datasource=(?<datasource>.+?) depName=(?<depName>.+?)( versioning=(?<versioning>.+?))?( extractVersion=(?<extractVersion>.+?))?( registryUrl=(?<registryUrl>.+?))?\\s.*(=|:\\s+)\"?(?<currentValue>.+?)\"?\\s",
+        "# renovate: datasource=(?<datasource>.+?) depName=(?<depName>.+?)( versioning=(?<versioning>.+?))?( extractVersion=(?<extractVersion>.+?))?( registryUrl=(?<registryUrl>.+?))?\\s.*[=:]\\s*\"?(?<currentValue>.+?)\"?\\s",
+        // Renovate for GH releases like: https://github.com/cert-manager/cert-manager/releases/download/v1.9.0/cert-manager.crds.yaml
+        "# renovate: datasource=(?<datasource>.+?) depName=(?<depName>.+?)( versioning=(?<versioning>.+?))?( extractVersion=(?<extractVersion>.+?))?( registryUrl=(?<registryUrl>.+?))?\\s.*\\/releases\\/download\\/(?<currentValue>.+?)\\/.*",
       ],
       "versioningTemplate": "{{#if versioning}}{{{versioning}}}{{else}}semver{{/if}}",
-      "extractVersionTemplate": "{{#if extractVersion}}{{{extractVersion}}}{{else}}^v?(?<version>.+)${{/if}}",
     },
   ],
   "separateMinorPatch": true,

@@ -25,7 +25,7 @@
       "automergeType": "branch",
       "automerge": true,
       "ignoreTests": true,
-      "schedule": ["on Thursday"],
+      "schedule": ["on Friday"],
     },
   ],
   "prBodyTemplate": "{{{table}}}{{{notes}}}{{{changelogs}}}",

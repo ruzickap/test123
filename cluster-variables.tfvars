@@ -3,6 +3,6 @@
 argocd_core_version = "2.3.5"
 
 # renovate: datasource=github-tags depName=fluxcd/flux2
-flux_version = "0.31.2"
+flux_version = "0.31.3"
 
 cluster_version                 = "1.22"

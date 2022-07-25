@@ -1,0 +1,46 @@
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+metadata:
+  name: mgmt1
+  region: eu-central-1
+  version: "1.22"
+  tags: &tags
+    karpenter.sh/discovery: mgmt1
+    Owner: petr.ruzicka@gmail.com
+    Environment: dev
+    Group: SOC
+iam:
+  withOIDC: true
+  serviceAccounts:
+    - metadata:
+        name: cert-manager
+        namespace: cert-manager
+      wellKnownPolicies:
+        certManager: true
+    - metadata:
+        name: external-dns
+        namespace: external-dns
+      wellKnownPolicies:
+        externalDNS: true
+karpenter:
+  # renovate: datasource=github-tags depName=aws/karpenter
+  version: 0.9.0
+  createServiceAccount: true
+addons:
+  - name: vpc-cni
+  - name: kube-proxy
+  - name: coredns
+  - name: aws-ebs-csi-driver
+managedNodeGroups:
+  - name: mgmt1-ng
+    amiFamily: Bottlerocket
+    instanceType: t3.medium
+    desiredCapacity: 2
+    minSize: 2
+    maxSize: 5
+    volumeSize: 30
+    tags:
+      <<: *tags
+      compliance:na:defender: bottlerocket
+    volumeEncrypted: true
+    disableIMDSv1: true

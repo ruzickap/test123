@@ -1,0 +1,31 @@
+name: Flux validate
+
+on:
+  workflow_dispatch:
+  push:
+    branches-ignore:
+      - main
+    paths:
+      - .github/workflows/flux-validate.yaml
+      - "clusters/**.yml"
+      - "flux/**.yaml"
+      - kustomization.yaml
+
+env:
+  # renovate: datasource=github-tags depName=yannh/kubeconform
+  KUBECONFORM_VERSION: v0.3.13
+
+jobs:
+  flux-validate:
+    runs-on: ubuntu-latest
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Intall kubeconform
+        run: |
+          curl -s -L "https://github.com/yannh/kubeconform/releases/download/${{ env.KUBECONFORM_VERSION }}/kubeconform-$(uname | sed "s/./\L&/g")-amd64.tar.gz" -o - | tar xzf - -C /usr/local/bin/ kubeconform
+
+      - name: Validate manifests
+        run: ./scripts/flux-validate.sh

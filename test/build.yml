@@ -1,0 +1,303 @@
+name: build
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_boxes:
+        type: choice
+        description: Build box name
+        default: "all"
+        options:
+          - "all"
+          - "my_windows-10-enterprise-x64-eval"
+          - "ubuntu-18.04-server-amd64"
+          - "ubuntu-20.04-desktop-amd64"
+          - "ubuntu-20.04-server-amd64"
+          - "windows-10-enterprise-x64-eval"
+          - "windows-server-2016-standard-x64-eval"
+          - "windows-server-2019-standard-x64-eval"
+          - "windows-server-2022-standard-x64-eval"
+        required: false
+      build_box_providers:
+        type: choice
+        description: Packer provider
+        default: "all"
+        options:
+          - "all"
+          - "libvirt"
+          - "virtualbox"
+        required: false
+      PACKER_LOG:
+        type: choice
+        description: PACKER_LOG (0, 1)
+        default: "0"
+        options:
+          - "0"
+          - "1"
+        required: false
+      ANSIBLE_DEBUG:
+        type: choice
+        description: ANSIBLE_DEBUG (true, false)
+        default: "false"
+        options:
+          - "false"
+          - "true"
+        required: false
+      VAGRANT_LOG:
+        type: choice
+        description: VAGRANT_LOG (debug, info, warn)
+        default: "warn"
+        options:
+          - "warn"
+          - "info"
+          - "debug"
+        required: false
+      build_upload:
+        type: choice
+        description: Upload release to Vagrant Cloud
+        default: "false"
+        options:
+          - "false"
+          - "true"
+        required: false
+  schedule:
+    - cron: "0 1 1 * *"
+
+env:
+  PACKER_IMAGES_OUTPUT_DIR: /var/tmp/packer-templates-images
+  PACKER_CACHE_DIR: /var/tmp/packer_cache
+  LOGDIR: /var/tmp/packer-templates-logs
+  VAGRANT_CLOUD_USER: peru
+  VAGRANT_CLOUD_TOKEN: ${{ secrets.VAGRANT_CLOUD_TOKEN }}
+  # Needed for Packer when calling ansible (https://github.com/ansible/ansible/issues/32499)
+  OBJC_DISABLE_INITIALIZE_FORK_SAFETY: YES
+  BUILD_BOX_LIST: |
+    (
+      "my_windows-10-enterprise-x64-eval"
+      "ubuntu-18.04-server-amd64"
+      "ubuntu-20.04-desktop-amd64"
+      "ubuntu-20.04-server-amd64"
+      "windows-10-enterprise-x64-eval"
+      "windows-server-2016-standard-x64-eval"
+      "windows-server-2019-standard-x64-eval"
+      "windows-server-2022-standard-x64-eval"
+    )
+  BUILD_BOX_PROVIDER_LIST: |
+    (
+      "libvirt"
+      "virtualbox"
+    )
+
+jobs:
+  generate-matrix:
+    name: "Generate matrix"
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - name: Get Matrix Builds
+        id: set-matrix
+        run: |
+          set -euxo pipefail
+
+          if [[ "${{ github.event.inputs.build_boxes }}" = "all" || "${{ github.event_name }}" == 'schedule' ]]; then
+            declare -a BUILD_BOXES=${{ env.BUILD_BOX_LIST }}
+          else
+            declare -a BUILD_BOXES=( "${{ github.event.inputs.build_boxes }}" )
+          fi
+
+          if [[ "${{ github.event.inputs.build_box_providers }}" = "all" || "${{ github.event_name }}" == 'schedule' ]]; then
+            declare -a BUILD_BOX_PROVIDERS=${{ env.BUILD_BOX_PROVIDER_LIST }}
+          else
+            declare -a BUILD_BOX_PROVIDERS=( "${{ github.event.inputs.build_box_providers }}" )
+          fi
+
+          for BUILD_BOX in "${BUILD_BOXES[@]}" ; do
+            NAME="${BUILD_BOX}"
+
+            for BUILD_BOX_PROVIDER in "${BUILD_BOX_PROVIDERS[@]}" ; do
+              PACKER_VAGRANT_PROVIDER="${BUILD_BOX_PROVIDER}"
+
+              # Check if the boxes (virtualbox/libvirt) with the same git hash already exists
+              if curl -s "https://app.vagrantup.com/${VAGRANT_CLOUD_USER}/boxes/${NAME}" | grep -q "Not found" ; then
+                CURRENT_VERSION_DESCRIPTION_MARKDOWN="Box doesn't exist"
+              else
+                CURRENT_VERSION_DESCRIPTION_MARKDOWN="$(curl -L --silent "https://app.vagrantup.com/api/v1/box/${VAGRANT_CLOUD_USER}/${NAME}" | jq '.current_version.version as $current_version | .versions[] | select (.version == $current_version) .description_markdown')"
+              fi
+
+              if [[ "${CURRENT_VERSION_DESCRIPTION_MARKDOWN}" =~ ${GITHUB_SHA} ]] ; then
+                echo "*** Git hash \"${GITHUB_SHA}\" found in current markdown description"
+                # Skip build if the box already exists
+                CURRENT_VERSION_PROVIDER_URL="$(curl -L --silent "https://app.vagrantup.com/api/v1/box/${VAGRANT_CLOUD_USER}/${NAME}" | jq -r ".current_version.version as \$current_version | .versions[] | select (.version == \$current_version) .providers[] | select (.name == \"${PACKER_VAGRANT_PROVIDER}\") .download_url")"
+                if [ -n "${CURRENT_VERSION_PROVIDER_URL}" ]; then
+                  echo "*** Found already build image \"${BUILD_BOX}-${PACKER_VAGRANT_PROVIDER}\" with hash \"${GITHUB_SHA}\": ${CURRENT_VERSION_PROVIDER_URL}"
+                  echo "*** This build will be skipped..."
+                else
+                  # Set BOX_VERSION variable from existing provider (if exists) or from "date"
+                  BOX_VERSION="$(curl -L --silent "https://app.vagrantup.com/api/v1/box/${VAGRANT_CLOUD_USER}/${NAME}" | jq -r ".current_version.version")"
+                  echo "*** Using previously defined box version \"${BOX_VERSION}\", because there is already builded box with git hash \"${GITHUB_SHA}\""
+                  BUILDS_MATRIX+=("${BUILD_BOX}-${PACKER_VAGRANT_PROVIDER}@${BOX_VERSION}")
+                fi
+              else
+                BOX_VERSION="$(date +%Y%m%d).01"
+                echo "*** Using new box version based on current date: ${BOX_VERSION}"
+                BUILDS_MATRIX+=("${BUILD_BOX}-${PACKER_VAGRANT_PROVIDER}@${BOX_VERSION}")
+              fi
+
+            done
+          done
+
+          jq --compact-output --null-input '$ARGS.positional' --args "${BUILDS_MATRIX[@]}"
+          echo "::set-output name=matrix::$( jq --compact-output --null-input '$ARGS.positional' --args "${BUILDS_MATRIX[@]}" )"
+
+  build-boxes:
+    name: "*"
+    runs-on: macos-10.15
+    needs: generate-matrix
+    if: ${{ needs.generate-matrix.outputs.matrix != '[]' && needs.generate-matrix.outputs.matrix != '' }}
+    concurrency:
+      group: build-boxes-${{ matrix.stage }}
+    strategy:
+      # Do not cancel matrix jobs if one of them fails
+      fail-fast: false
+      matrix:
+        stage: ${{ fromJSON(needs.generate-matrix.outputs.matrix) }}
+
+    steps:
+      - name: Set PACKER_LOG, ANSIBLE_DEBUG, VAGRANT_LOG variables when using workflow_dispatch
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        run: |
+          set -euo pipefail
+          cat << EOF | tee -a "${GITHUB_ENV}"
+          PACKER_LOG=${{ github.event.inputs.PACKER_LOG }}
+          ANSIBLE_DEBUG=${{ github.event.inputs.ANSIBLE_DEBUG }}
+          VAGRANT_LOG=${{ github.event.inputs.VAGRANT_LOG }}
+          EOF
+
+      - name: Set global environment variables like BOX_VERSION, BUILD, NAME, PACKER_VAGRANT_PROVIDER
+        run: |
+          set -euo pipefail
+          STAGE="${{ matrix.stage }}"
+          echo "*** STAGE: ${STAGE}"
+
+          # shellcheck disable=SC2001
+          cat << EOF | tee -a "${GITHUB_ENV}"
+          BOX_VERSION=${STAGE##*@}
+          BUILD=${STAGE%@*}
+          NAME=${STAGE%-*}
+          PACKER_VAGRANT_PROVIDER=$(echo "${STAGE}" | sed 's/.*-\([^@]*\).*/\1/')
+          EOF
+
+      - uses: actions/checkout@v3
+        with:
+          submodules: true
+
+      - name: Install packages
+        run: |
+          set -euxo pipefail
+          [[ -f /usr/local/bin/2to3 ]] && rm /usr/local/bin/2to3
+          # Remove unused packages to save some disk space
+          rm -rf /Users/runner/Library/Developer /Users/runner/Library/Android /Users/runner/hostedtoolcache /Users/runner/.dotnet
+          brew install bash coreutils gettext gnu-sed jq packer python@3.10 hudochenkov/sshpass/sshpass vagrant
+          if [[ "${PACKER_VAGRANT_PROVIDER}" = "libvirt" ]]; then
+            brew install qemu xorriso
+          fi
+          if [[ "${PACKER_VAGRANT_PROVIDER}" = "virtualbox" ]]; then
+            brew install virtualbox
+            brew install --cask virtualbox-extension-pack
+          fi
+          # renovate: datasource=pypi depName=ansible
+          ANSIBLE_VERSION="5.9.0"
+          pip3 install ansible=="${ANSIBLE_VERSION}"
+          if [[ "${BUILD}" =~ windows ]]; then
+            # renovate: datasource=pypi depName=pywinrm
+            PYWINRM_VERSION="0.4.1"
+            pip3 install pywinrm=="${PYWINRM_VERSION}"
+            # renovate: datasource=galaxy-collection depName=ansible.windows
+            ANSIBLE_WINDOWS_VERSION="1.9.1"
+            # renovate: datasource=galaxy-collection depName=chocolatey.chocolatey
+            ANSIBLE_CHOCOLATEY_VERSION="1.2.1"
+            ansible-galaxy collection install ansible.windows:="${ANSIBLE_WINDOWS_VERSION}" chocolatey.chocolatey:="${ANSIBLE_CHOCOLATEY_VERSION}"
+          fi
+          echo "/usr/local/bin:/usr/local/opt/gnu-sed/libexec/gnubin:/usr/local/opt/coreutils/libexec/gnubin" >> "${GITHUB_PATH}"
+
+      - name: Build image
+        id: build_image
+        run: |
+          ./build.sh "${BUILD}"
+
+      - name: Upload logs to GitHub artifact store in case of VirtualBox failure
+        uses: actions/upload-artifact@v3
+        if: ${{ always() && (steps.build_image.outcome == 'failure') && contains(matrix.stage, 'virtualbox') }}
+        with:
+          name: ${{ matrix.stage }}
+          path: ${{ env.LOGDIR }}/*
+          retention-days: 1
+
+      - name: Check the created box image
+        run: |
+          if [[ "${PACKER_VAGRANT_PROVIDER}" = "virtualbox" ]] ; then
+            ./vagrant_init_destroy_boxes.sh "${PACKER_IMAGES_OUTPUT_DIR}/${BUILD}.box"
+          else
+            echo "*** Skipping the checks..."
+          fi
+
+      - name: Upload box to Vagrant Cloud
+        if: ${{ github.event_name == 'schedule' || github.event.inputs.build_upload == 'true' }}
+        run: |
+          ./upload_box_to_vagrantcloud.sh "${VAGRANT_CLOUD_USER}@${PACKER_IMAGES_OUTPUT_DIR}/${BUILD}.box"
+
+      - name: Setup tmate session
+        if: ${{ failure() }}
+        uses: mxschmitt/action-tmate@v3
+        with:
+          limit-access-to-actor: true
+
+  clean_check_versions:
+    needs: build-boxes
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Remove old versions
+        run: |
+          set -euxo pipefail
+
+          declare -a BUILD_BOXES=${{ env.BUILD_BOX_LIST }}
+
+          for NAME in "${BUILD_BOXES[@]}"; do
+            while read -r VERSION ; do
+              echo "*** Removing box version: https://vagrantcloud.com/api/v1/box/${VAGRANT_CLOUD_USER}/${NAME}/version/${VERSION}"
+              curl -s "https://app.vagrantup.com/api/v1/box/${VAGRANT_CLOUD_USER}/${NAME}/version/${VERSION}" -X DELETE -d "access_token=${VAGRANT_CLOUD_TOKEN}" -o /dev/null
+            done < <( curl -s "https://app.vagrantup.com/api/v1/box/${VAGRANT_CLOUD_USER}/${NAME}" | jq -r '.current_version.version as $current_version | .versions[] | select (.version != $current_version) .version' )
+
+            # Verify if current version of the box has both boxes (virtualbox + libvirt)
+            CURRENT_VERSION_PROVIDERS=$(curl -s "https://app.vagrantup.com/api/v1/box/${VAGRANT_CLOUD_USER}/${NAME}"| jq -r ".current_version.providers|length")
+            if [[ ${CURRENT_VERSION_PROVIDERS} -ne 2 ]]; then
+              echo "*** Current version of ${VAGRANT_CLOUD_USER}/${NAME} does not contain both box versions (virtualbox + libvirt) !"
+              continue
+            fi
+          done
+
+      - name: Verify if the boxes are available on the Vagrant Cloud
+        run: |
+          set -euxo pipefail
+
+          declare -a BUILD_BOXES=${{ env.BUILD_BOX_LIST }}
+          declare -a BUILD_BOX_PROVIDERS=${{ env.BUILD_BOX_PROVIDER_LIST }}
+
+          for NAME in "${BUILD_BOXES[@]}"; do
+            for VAGRANT_PROVIDER in "${BUILD_BOX_PROVIDERS[@]}"; do
+              CURRENT_VERSION=$(curl -s "https://app.vagrantup.com/api/v1/box/${VAGRANT_CLOUD_USER}/${NAME}" | jq -r ".current_version.version")
+              CHECKSUM=$(curl -s "https://app.vagrantup.com/api/v1/box/${VAGRANT_CLOUD_USER}/${NAME}" | jq -r ".current_version.providers[] | select (.name == \"${VAGRANT_PROVIDER}\") .checksum")
+              URL="https://app.vagrantup.com/${VAGRANT_CLOUD_USER}/boxes/${NAME}/versions/${CURRENT_VERSION}/providers/${VAGRANT_PROVIDER}.box"
+              echo "*** ${URL} | ${CHECKSUM}"
+              if ! curl -L --fail --silent --head --output /dev/null "${URL}"; then
+                echo "* URL \"${URL}\" is not accessible !"
+                exit 1
+              fi
+              if [ "$(curl -s "https://app.vagrantup.com/${VAGRANT_CLOUD_USER}/boxes/${NAME}" | jq '.versions | length')" != "1" ]; then
+                echo "* Too many versions for: https://app.vagrantup.com/${VAGRANT_CLOUD_USER}/boxes/${NAME} !"
+                exit 2
+              fi
+            done
+          done

@@ -1,0 +1,279 @@
+name: clusters-aws-reusable-workflow
+
+on:
+  workflow_call:
+    inputs:
+      clusters:
+        description: Cluster list
+        required: true
+        type: string
+      terraform_action:
+        description: Cluster Terraform action
+        required: true
+        type: string
+      env-variables:
+        description: Environment variable(s)
+        required: true
+        type: string
+    secrets:
+      CREATE_FLUX_DEPLOY_KEY_GITHUB_TOKEN:
+        description: GitHub token used to create Flux deploy key
+        required: true
+
+jobs:
+  generate-cluster-aws-matrix:
+    name: "Generate AWS Cluster matrix"
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - name: Check out repository code
+        uses: actions/checkout@v3
+
+      - name: 💡🔪 Get clusters
+        id: set-matrix
+        run: |
+          set -euxo pipefail
+
+          # Find cluster names matching the given regexp (and exclude `argocd|flux` directory)
+          CLUSTERS=$(find clusters/*/*\.*\.* -maxdepth 0 -mindepth 0 -type d -regextype "posix-extended" -regex '${{ inputs.clusters }}' -printf "%f\n" | sort)
+
+          echo "*** Export list of clusters"
+          # shellcheck disable=SC2001
+          echo "*** ${CLUSTERS}" | sed 's@\(.*\)@🔎 \1@'
+          if [[ -z "${CLUSTERS}" ]] ; then
+            echo "🔥 No clusters found / selected / ... !!!"
+            exit 1
+          fi
+          echo "::set-output name=matrix::$( echo "${CLUSTERS}" | jq -c -R -s 'split("\n")[:-1]' )"
+
+  cluster-aws-pipeline:
+    name: "${{ inputs.terraform_action }} | ${{ matrix.stage }}"
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    # Cancel job after 100 minutes (just in case)
+    timeout-minutes: 100
+    if: ${{ needs.generate-cluster-aws-matrix.outputs.matrix != '[""]' }}
+    needs: generate-cluster-aws-matrix
+    env:
+      # Terraform variables (https://www.terraform.io/docs/cli/config/environment-variables.html)
+      # renovate: datasource=github-tags depName=hashicorp/terraform
+      TERRAFORM_VERSION: "1.2.4"
+      TF_INPUT: "0"
+      TF_CLI_ARGS_apply: "-auto-approve"
+      TF_CLI_ARGS_destroy: "-auto-approve"
+      TF_IN_AUTOMATION: "true"
+      TF_VAR_github_token: ${{ secrets.CREATE_FLUX_DEPLOY_KEY_GITHUB_TOKEN }}
+    # Allow only one execution of terraform per cluster (other executions will wait until first will complete)
+    concurrency:
+      group: cluster-aws-pipeline-${{ matrix.stage }}
+    strategy:
+      # Do not cancel matrix jobs if one of them fails
+      fail-fast: false
+      matrix:
+        stage: ${{ fromJSON(needs.generate-cluster-aws-matrix.outputs.matrix) }}
+
+    steps:
+      - name: 💡🔪 Check out repository code
+        uses: actions/checkout@v3
+
+      - name: 💡🔪 Get and display environment variables
+        run: |
+          set -euxo pipefail
+
+          # Funcion to extract variables from "${CLUSTER_PATH}/cluster-variables.tfvars" "${CLUSTER_PATH}/../group-variables.tfvars"
+          # Example: get_variable_from_group_cluster_tfvars /cluster/mycluster my_lowercase_variable_name
+          get_variable_from_group_cluster_tfvars () {
+            local CLUSTER_PATH="$1" TF_CODE_VARIABLE="$2" VARIABLE_HELPER
+            if grep -q "${TF_CODE_VARIABLE}" "${CLUSTER_PATH}/cluster-variables.tfvars" ; then
+              VARIABLE_HELPER=$(awk -F \" "/^${TF_CODE_VARIABLE}/ { print \$2 }" "${CLUSTER_PATH}/cluster-variables.tfvars")
+            else
+              VARIABLE_HELPER=$(awk -F \" "/^${TF_CODE_VARIABLE}/ { print \$2 }" "${CLUSTER_PATH}/../group-variables.tfvars")
+            fi
+            echo -e "\n💡 Variable: \"${TF_CODE_VARIABLE^^}\" = \"${VARIABLE_HELPER}\""
+            echo "${TF_CODE_VARIABLE^^}=${VARIABLE_HELPER}" >> "${GITHUB_ENV}"
+            export "${TF_CODE_VARIABLE^^}=${VARIABLE_HELPER}"
+            echo "::set-output name=${TF_CODE_VARIABLE^^}::${VARIABLE_HELPER}"
+          }
+
+          echo -e "🎉 The job was automatically triggered by a \"${{ github.event_name }}\" event."
+          echo -e "💡 The name of your branch is ${{ github.ref }}"
+          echo -e "💊 Action: ${{ inputs.terraform_action }}"
+
+          # Find cluster path based on cluster FQDN (matrix.stage)
+          CLUSTER_PATH=$(find clusters/*/*\.*\.* -maxdepth 0 -mindepth 0 -type d -regextype "posix-extended" -regex '.*${{ matrix.stage }}.*')
+          echo -e "\n🍏 Cluster path: ${CLUSTER_PATH}"
+          echo "CLUSTER_PATH=${CLUSTER_PATH}" >> "${GITHUB_ENV}"
+
+          get_variable_from_group_cluster_tfvars "${CLUSTER_PATH}" "aws_default_region"
+          get_variable_from_group_cluster_tfvars "${CLUSTER_PATH}" "aws_assume_role"
+          get_variable_from_group_cluster_tfvars "${CLUSTER_PATH}" "cluster_fqdn"
+          echo "CLUSTER_NAME=${CLUSTER_FQDN%%.*}" | tee -a "${GITHUB_ENV}"
+          get_variable_from_group_cluster_tfvars "${CLUSTER_PATH}" "terraform_code_dir"
+
+          echo -e "\n🍏 Set pre-defined environment variables (if any)"
+          # shellcheck disable=SC2043
+          for ENV_VARIABLE in ${{ inputs.env-variables }} ; do
+            echo "${ENV_VARIABLE}" | tee -a "${GITHUB_ENV}"
+          done
+
+      - name: 💡 Amazon EKS cluster access (kubeconfig)
+        if: ${{ inputs.terraform_action == 'apply' }}
+        run: |
+          cat << EOF | tee -a "${GITHUB_STEP_SUMMARY}"
+          * :low_brightness: ${CLUSTER_FQDN}
+            \`\`\`
+            export KUBECONFIG="/tmp/kubeconfig-${CLUSTER_NAME}.conf"
+            eval "\$(aws sts assume-role --role-arn "${AWS_ASSUME_ROLE}" --role-session-name "$USER@\$(hostname -f)-k8s-tf-eks-gitops-\$(date +%s)" --duration-seconds 36000 | jq -r '.Credentials | "export AWS_ACCESS_KEY_ID=\(.AccessKeyId)\nexport AWS_SECRET_ACCESS_KEY=\(.SecretAccessKey)\nexport AWS_SESSION_TOKEN=\(.SessionToken)\n"')"
+            aws eks update-kubeconfig --region "${AWS_DEFAULT_REGION}" --name "${CLUSTER_NAME}" --kubeconfig "\$KUBECONFIG"
+            \`\`\`
+          EOF
+
+      - name: 💡🔪 Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          role-to-assume: ${{ env.AWS_ASSUME_ROLE }}
+          role-session-name: GitHubOidcFederatedRole
+          aws-region: ${{ env.AWS_DEFAULT_REGION }}
+
+      - name: 💡 Create S3 bucket + DynamoDB for Terraform if needed
+        if: ${{ ! startsWith(inputs.terraform_action, 'destroy') }}
+        run: |
+          set -euxo pipefail
+          aws sts get-caller-identity
+          echo -e "\n***💡 Check if S3 bucket exists (may show 404 error - ignore)"
+          if ! aws s3api head-bucket --bucket "${CLUSTER_FQDN}" ; then
+            echo -e "\n***💡 Creating S3 bucket for Terraform using CloudFormation"
+            aws cloudformation deploy \
+              --parameter-overrides "ClusterFQDN=${CLUSTER_FQDN}" \
+              --stack-name "${CLUSTER_FQDN//./-}-s3-dynamodb-tfstate" --template-file "./cloudformation/s3-dynamodb-tfstate.yaml"
+          else
+            echo -e "\n***💡 S3 bucket for Terraform - \"${CLUSTER_FQDN}\" already exists...\n"
+          fi
+
+      - name: 💡🔪 Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      # Terraform needs node command: https://github.com/hashicorp/setup-terraform/issues/84
+      - uses: actions/setup-node@v3
+        with:
+          # renovate: datasource=github-tags depName=nodejs/node versioning=node
+          node-version: 15
+
+      - name: 💡🔪 Terraform init
+        run: |
+          set -euxo pipefail
+          terraform -chdir="${TERRAFORM_CODE_DIR}" init \
+            -backend-config="bucket=${CLUSTER_FQDN}" \
+            -backend-config="key=terraform-${CLUSTER_FQDN}.tfstate" \
+            -backend-config="region=${AWS_DEFAULT_REGION}" \
+            -backend-config="dynamodb_table=${CLUSTER_FQDN}"
+
+      # Some internal apps creating AWS objectls like (Loadbalancers, Route53)
+      # which then prevents terrafrom to "cleanly" remove all it's objects.
+      # Therefore I need to remove them in k8s which will cause deleting them
+      # from AWS
+      - name: 🔪 Delete k8s objects Loadbalancer, external-dns
+        if: ${{ startsWith(inputs.terraform_action, 'destroy') }}
+        run: |
+          set -euxo pipefail
+
+          export KUBECONFIG="/tmp/kubeconfig-${CLUSTER_NAME}.conf"
+          if aws eks update-kubeconfig --name "${CLUSTER_NAME}" --kubeconfig "${KUBECONFIG}" ; then
+            kubectl delete deployments -n external-dns -l app.kubernetes.io/name=external-dns || true
+            kubectl delete service -n ingress-nginx -l app.kubernetes.io/component=controller || true
+            kubectl delete secrets.secretsmanager.aws.crossplane.io -n kuard -l app=kuard || true
+            rm "${KUBECONFIG}"
+          fi
+
+          echo "*** Remove Network ELBs"
+          for NETWORK_ELB_ARN in $(aws elbv2 describe-load-balancers --query "LoadBalancers[].LoadBalancerArn" --output=text) ; do
+            if [[ "$(aws elbv2 describe-tags --resource-arns "${NETWORK_ELB_ARN}" --query "TagDescriptions[].Tags[?Key == \`kubernetes.io/cluster/${CLUSTER_NAME}\`]" --output text)" =~ ${CLUSTER_NAME} ]]; then
+              echo "*** Deleting Network ELB: ${NETWORK_ELB_ARN}"
+              aws elbv2 delete-load-balancer --load-balancer-arn "${NETWORK_ELB_ARN}"
+            fi
+          done
+
+          echo "*** Remove Classic ELBs"
+          for CLASSIC_ELB_NAME in $(aws elb describe-load-balancers --query "LoadBalancerDescriptions[].LoadBalancerName" --output=text) ; do
+            if [[ "$(aws elb describe-tags --load-balancer-names "${CLASSIC_ELB_NAME}" --query "TagDescriptions[].Tags[?Key == \`kubernetes.io/cluster/${CLUSTER_NAME}\`]" --output text)" =~ ${CLUSTER_NAME} ]]; then
+              echo "*** Deleting Classic ELB: ${CLASSIC_ELB_NAME}"
+              aws elb delete-load-balancer --load-balancer-name "${CLASSIC_ELB_NAME}"
+            fi
+          done
+
+          echo "*** Remove orphan Target Groups"
+          for TARGET_GROUP_ARN in $(aws elbv2 describe-target-groups --region=eu-central-1 --query "TargetGroups[].TargetGroupArn" --output=text) ; do
+            if [[ "$(aws elbv2 describe-tags --resource-arns "${TARGET_GROUP_ARN}" --query "TagDescriptions[].Tags[?Key == \`kubernetes.io/cluster/${CLUSTER_NAME}\`]" --output text)" =~ ${CLUSTER_NAME} ]]; then
+              echo "*** Deleting Target Group: ${TARGET_GROUP_ARN}"
+              aws elbv2 delete-target-group --target-group-arn "${TARGET_GROUP_ARN}"
+            fi
+          done
+
+          echo "*** Remove entries froum Route53"
+          CLUSTER_FQDN_ZONE_ID=$(aws route53 list-hosted-zones --query "HostedZones[?Name==\`${CLUSTER_FQDN}.\`].Id" --output text)
+          if [[ -n "${CLUSTER_FQDN_ZONE_ID}" ]]; then
+            aws route53 list-resource-record-sets --hosted-zone-id "${CLUSTER_FQDN_ZONE_ID}" | jq -c '.ResourceRecordSets[] | select (.Type != "SOA" and .Type != "NS")' |
+            while read -r RESOURCERECORDSET; do
+              aws route53 change-resource-record-sets \
+                --hosted-zone-id "${CLUSTER_FQDN_ZONE_ID}" \
+                --change-batch '{"Changes":[{"Action":"DELETE","ResourceRecordSet": '"${RESOURCERECORDSET}"' }]}' \
+                --output text --query 'ChangeInfo.Id'
+            done
+          fi
+
+      - name: 💡🔪 Terraform action
+        run: |
+          set -euxo pipefail
+          terraform -chdir="${TERRAFORM_CODE_DIR}" ${{ inputs.terraform_action }} \
+            -var-file="${PWD}/${CLUSTER_PATH}/../../main-variables.tfvars" \
+            -var-file="${PWD}/${CLUSTER_PATH}/../group-variables.tfvars" \
+            -var-file="${PWD}/${CLUSTER_PATH}/cluster-variables.tfvars"
+
+      - name: 🔪 Delete Volumes / Snapshost created by k8s cluster
+        if: ${{ startsWith(inputs.terraform_action, 'destroy') }}
+        run: |
+          set -euxo pipefail
+
+          echo "*** Remove Volumes and Snapshots related to the cluster"
+          VOLUMES=$(aws ec2 describe-volumes --filter "Name=tag:kubernetes.io/cluster/${CLUSTER_NAME},Values=owned" --query 'Volumes[].VolumeId' --output text) && \
+          for VOLUME in ${VOLUMES}; do
+            echo "*** Removing Volume: ${VOLUME}"
+            aws ec2 delete-volume --volume-id "${VOLUME}"
+          done
+
+          SNAPSHOTS=$(aws ec2 describe-snapshots --filter "Name=tag:kubernetes.io/cluster/${CLUSTER_NAME},Values=owned" --query 'Snapshots[].SnapshotId' --output text) && \
+          for SNAPSHOT in ${SNAPSHOTS}; do
+            echo "*** Removing Snapshot: ${SNAPSHOT}"
+            aws ec2 delete-snapshot --snapshot-id "${SNAPSHOT}"
+          done
+
+          echo "*** Delete entries in Amazon Secret Manager if not done correctly before"
+          aws secretsmanager delete-secret --secret-id "secretsmanager-kuard-secret" --force-delete-without-recovery
+
+      - name: 🔪 Delete S3 bucket + DynamoDB used by Terraform
+        if: ${{ startsWith(inputs.terraform_action, 'destroy') }}
+        run: |
+          set -euxo pipefail
+
+          S3_OBJECTS=$(aws s3api list-object-versions --bucket "${CLUSTER_FQDN}" --query='{Objects: Versions[].{Key:Key,VersionId:VersionId}}')
+
+          if [[ ! "${S3_OBJECTS}" =~ "\"Objects\": null" ]]; then
+            aws s3api delete-objects --bucket "${CLUSTER_FQDN}" \
+              --delete "${S3_OBJECTS}" \
+              --output=json | jq
+          fi
+
+          aws cloudformation delete-stack --stack-name "${CLUSTER_FQDN//./-}-s3-dynamodb-tfstate"
+          aws cloudformation wait stack-delete-complete --stack-name "${CLUSTER_FQDN//./-}-s3-dynamodb-tfstate"
+
+      # - name: Setup tmate session
+      #   if: ${{ failure() }}
+      #   uses: mxschmitt/action-tmate@v3
+      #   timeout-minutes: 15
+      #   with:
+      #     limit-access-to-actor: true

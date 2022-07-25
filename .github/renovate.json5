@@ -53,8 +53,8 @@
   "regexManagers": [
     {
       "fileMatch": [
-        "^\\.github/workflows/.*\\.ya?ml$",
-        "^docs/src/part-.*\\.md$",
+        ".*\\.ya?ml$",
+        "part-.*\\.md$",
         ".*\\.tfvars$",
         "README\\.md$",
         "kustomization\\.yaml$",
@@ -62,8 +62,9 @@
       "matchStrings": [
         "# renovate: datasource=(?<datasource>.+?) depName=(?<depName>.+?)( versioning=(?<versioning>.+?))?( extractVersion=(?<extractVersion>.+?))?( registryUrl=(?<registryUrl>.+?))?\\s.*[=:]\\s*\"?(?<currentValue>.+?)\"?\\s",
         // Renovate for GH releases like: https://github.com/cert-manager/cert-manager/releases/download/v1.9.0/cert-manager.crds.yaml
-        "# renovate: datasource=(?<datasource>.+?) depName=(?<depName>.+?)( versioning=(?<versioning>.+?))?( extractVersion=(?<extractVersion>.+?))?( registryUrl=(?<registryUrl>.+?))?\\s.*\\/releases\\/download\\/(?<currentValue>.+?)\\/.*",
+        "# renovate: datasource=(?<datasource>.+?) depName=(?<depName>.+?)( versioning=(?<versioning>.+?))?( extractVersion=(?<extractVersion>.+?))?\\s.*\\/releases\\/download\\/(?<currentValue>.+?)\\/.*",
       ],
+      "extractVersionTemplate": "{{#if extractVersion}}{{{extractVersion}}}{{else}}^v?(?<version>.+)${{/if}}",
       "versioningTemplate": "{{#if versioning}}{{{versioning}}}{{else}}semver{{/if}}",
     },
   ],

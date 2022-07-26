@@ -211,7 +211,7 @@ jobs:
           pip3 install ansible=="${ANSIBLE_VERSION}"
           if [[ "${BUILD}" =~ windows ]]; then
             # renovate: datasource=pypi depName=pywinrm
-            PYWINRM_VERSION="0.4.1"
+            PYWINRM_VERSION="0.4.3"
             pip3 install pywinrm=="${PYWINRM_VERSION}"
             # renovate: datasource=galaxy-collection depName=ansible.windows
             ANSIBLE_WINDOWS_VERSION="1.9.1"
